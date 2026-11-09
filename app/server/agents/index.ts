@@ -24,6 +24,7 @@ const NPM_CODEX = IS_WIN && process.env.APPDATA ? join(process.env.APPDATA, 'npm
 // Resolved per call, not at load, so a codex installed through npm after the server started is found on the next probe
 const codexBin = () => process.env.CODEX_BIN || (NPM_CODEX && existsSync(NPM_CODEX) ? NPM_CODEX : 'codex');
 const CLAUDE_TOOLS = 'Bash,Read,Write,Edit,Glob,Grep,Skill,WebFetch,WebSearch,TodoWrite';
+const OPENCODE_PRIMARY_MODEL = 'google/gemini-3.1-flash-lite';
 
 export interface AgentRun {
   kind: AgentKind;
@@ -55,8 +56,12 @@ function probe(cmd: string): Promise<string | null> {
 }
 
 export async function agentStatus(): Promise<AgentStatus> {
-  const [claude, codex] = await Promise.all([probe('claude'), probe(codexBin())]);
-  return { claude, codex };
+  const [claude, codex, opencode] = await Promise.all([
+    probe('claude'),
+    probe(codexBin()),
+    probe('opencode'),
+  ]);
+  return { claude, codex, opencode };
 }
 
 function lines(stream: Readable, onLine: (l: string) => void) {
@@ -106,13 +111,90 @@ export function parseCodex(obj: Json, emit: Emit, st: TurnState) {
   if (obj.type === 'turn.failed' || obj.type === 'error') { st.ok = false; emit({ type: 'error', text: short(obj.error?.message || obj.message || obj, 400) }); }
 }
 
+
+function opencodeArgs(sessionId?: string | null, model = OPENCODE_PRIMARY_MODEL): string[] {
+  const args = ['run', '--model', model, '--format', 'json'];
+  if (sessionId) args.push('--session', sessionId);
+  return args;
+}
+
+function parseOpenCode(obj: Json, emit: Emit, st: TurnState): void {
+  const sessionId = obj.sessionID || obj.sessionId;
+
+  if (sessionId && sessionId !== st.sessionId) {
+    st.sessionId = sessionId;
+    emit({ type: 'session', id: sessionId });
+  }
+
+  const type = obj.type;
+  const part = obj.part;
+
+  const message =
+    part?.type === 'text' ? part.text :
+    type === 'text' ? obj.text :
+    null;
+
+  if (typeof message === 'string' && message.trim()) {
+    st.text += message;
+    emit({ type: 'text', text: message });
+  }
+
+  if (type === 'tool_use' || part?.type === 'tool') {
+    emit({
+      type: 'tool',
+      name: part?.tool || obj.tool || 'tool',
+      detail: short(part?.input || obj.input || obj.tool || ''),
+    });
+  }
+
+  if (type === 'error') {
+    st.ok = false;
+
+    const error = short(
+      obj.error?.message ||
+      obj.message ||
+      obj.error ||
+      'OpenCode provider error',
+      400,
+    );
+
+    st.lastError = error;
+    emit({ type: 'error', text: error });
+  }
+
+  if (type === 'step_finish') {
+    const reason = part?.reason || obj.reason;
+
+    if (reason === 'stop') {
+      st.ok = true;
+    } else if (reason === 'error') {
+      st.ok = false;
+    }
+  }
+}
+
 export interface DropTrack { n: number; sample: string }
 // One stdout line: valid JSON goes to the parsers; anything else is counted
 // (CLI warnings, truncated lines) instead of vanishing without a trace.
-export function feedStdout(l: string, isClaude: boolean, emit: Emit, st: TurnState, drop: DropTrack): void {
+export function feedStdout(
+  l: string,
+  kind: AgentKind,
+  emit: Emit,
+  st: TurnState,
+  drop: DropTrack,
+): void {
   let obj: Json;
-  try { obj = JSON.parse(l); } catch { drop.n++; if (!drop.sample) drop.sample = l.slice(0, 200); return; }
-  (isClaude ? parseClaude : parseCodex)(obj, emit, st);
+  try {
+    obj = JSON.parse(l);
+  } catch {
+    drop.n++;
+    if (!drop.sample) drop.sample = l.slice(0, 200);
+    return;
+  }
+
+  if (kind === 'claude') parseClaude(obj, emit, st);
+  else if (kind === 'codex') parseCodex(obj, emit, st);
+  else parseOpenCode(obj, emit, st);
 }
 // At turn end: if the CLI produced no text and nothing else explains why, say
 // what was dropped so the error card names a cause instead of going out blank.
@@ -127,22 +209,33 @@ export function runAgent({ kind, cwd, prompt, sessionId, onEvent = () => {}, sig
     const emit: Emit = (e) => { if (e.type === 'error') st.lastError = e.text; onEvent(e); };   // keep the last error for the job's error card
     const drop: DropTrack = { n: 0, sample: '' };
     const isClaude = kind === 'claude';
-    const cmd = isClaude ? 'claude' : codexBin();
-    const args = isClaude ? claudeArgs(sessionId) : codexArgs(sessionId, cwd);
+    const isCodex = kind === 'codex';
+
+    const cmd = isClaude
+      ? 'claude'
+      : isCodex
+        ? codexBin()
+        : 'opencode';
+
+    const args = isClaude
+      ? claudeArgs(sessionId)
+      : isCodex
+        ? codexArgs(sessionId, cwd)
+        : opencodeArgs(sessionId);
     // Windows: npm shims (claude.cmd) need a shell; args are fixed literals, the prompt goes through stdin.
     // its own process group (POSIX), so a cancel stops the renders and browsers it started too, not only the CLI
     const child = spawn(cmd, args, { cwd, shell: IS_WIN, ...treeOpts, env: { ...process.env, ...env, HYPERFRAMES_NO_TELEMETRY: '1', DO_NOT_TRACK: '1' } });
     // the signal lives as long as the whole flow: drop the listener when this turn ends, so finished children aren't killed (or kept) later
     const onAbort = () => killTree(child);
     if (signal) { if (signal.aborted) killTree(child); else signal.addEventListener('abort', onAbort, { once: true }); }
-    lines(child.stdout, (l) => feedStdout(l, isClaude, emit, st, drop));
+    lines(child.stdout, (l) => feedStdout(l, kind, emit, st, drop));
     let err = '';
     lines(child.stderr, (l) => { err += l + '\n'; if (!/^\s*$/.test(l) && !/DeprecationWarning|ExperimentalWarning/.test(l)) emit({ type: 'error', text: short(l, 400) }); });
     child.on('error', (e) => { emit({ type: 'error', text: `${cmd} failed to start: ${e.message}` }); });
     child.on('close', (code) => {
       signal?.removeEventListener('abort', onAbort);
       if (code !== 0) st.ok = false;
-      else if (!isClaude && st.ok === false && !err) st.ok = true;
+      else if (isCodex && st.ok === false && !err) st.ok = true;
       noteDropped(st, drop, emit);
       onEvent({ type: 'done', ok: st.ok, text: st.text, cost: st.cost });
       resolve({ sessionId: st.sessionId, text: st.text, ok: st.ok, code, stderr: err.slice(-2000), lastError: st.lastError });

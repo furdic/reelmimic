@@ -65,9 +65,11 @@ console.log('\nAI director (at least one)');
 const claude = run('claude', ['--version']);
 const codexBin = process.env.CODEX_BIN || 'codex';
 const codex = run(codexBin, ['--version']);
+const opencode = run('opencode', ['--version']);
 claude ? ok(`Claude Code ${claude}`) : opt('Claude Code CLI not found', 'npm i -g @anthropic-ai/claude-code, then run `claude` once to log in');
 codex ? ok(`Codex ${codex}`) : opt('Codex CLI not found', 'npm i -g @openai/codex, then `codex login`');
-if (!claude && !codex) bad('no agent CLI available', 'install Claude Code or Codex (see above)');
+opencode ? ok(`OpenCode ${opencode}`) : opt('OpenCode CLI not found', 'install OpenCode and configure a provider');
+if (!claude && !codex && !opencode) bad('no agent CLI available', 'install Claude Code, Codex, or OpenCode (see above)');
 
 console.log('\nOptional');
 const secretsPath = [join(homedir(), '.reelmimic', 'secrets.json'), join(homedir(), '.clone-studio', 'secrets.json')].find((p) => existsSync(p)) || join(homedir(), '.reelmimic', 'secrets.json');

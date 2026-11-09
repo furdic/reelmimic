@@ -1,7 +1,7 @@
 // Shapes shared by the server and the web app: job.json, the project snapshot, live events.
 // Files written by agents (plan.json, reviews, critique…) follow CONTRACT.md; only the fields the app reads are typed here.
 
-export type AgentKind = 'claude' | 'codex';
+export type AgentKind = 'claude' | 'codex' | 'opencode';
 export type Lang = 'zh-TW' | 'en' | 'zh-CN';
 
 export type Stage =

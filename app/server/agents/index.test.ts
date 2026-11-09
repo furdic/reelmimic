@@ -70,8 +70,8 @@ test('non-JSON stdout lines are counted, valid lines still parse', () => {
   const events: AgentEvent[] = [], st = { sessionId: null, text: '', ok: false, cost: null, lastError: '' };
   const drop = { n: 0, sample: '' };
   const emit = (e: AgentEvent) => { if (e.type === 'error') st.lastError = e.text; events.push(e); };
-  feedStdout('not json {', true, emit, st, drop);
-  feedStdout('{"type":"result","subtype":"success","is_error":false,"result":"hi"}', true, emit, st, drop);
+  feedStdout('not json {', 'claude', emit, st, drop);
+  feedStdout('{"type":"result","subtype":"success","is_error":false,"result":"hi"}', 'claude', emit, st, drop);
   assert.equal(drop.n, 1);
   assert.equal(drop.sample, 'not json {');
   assert.equal(st.text, 'hi');
